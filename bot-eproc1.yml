@@ -1,0 +1,53 @@
+name: Bot eproc1 (TJRJ + TJRS) - captação de processos
+
+on:
+  schedule:
+    # Mesma lógica do PJe: 6h de teto por execução do GitHub
+    # Actions, expediente de 9h (8h-17h Brasília) — 2 disparos.
+    - cron: '0 11 * * 1-5'   # 08:00 em Brasília
+    - cron: '0 17 * * 1-5'   # 14:00 em Brasília
+  workflow_dispatch:
+    inputs:
+      ignorar_horario:
+        description: 'Rodar mesmo fora da janela 8h-17h (só para testes manuais)'
+        type: boolean
+        default: false
+
+jobs:
+  captar-processos:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: Baixar o código
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar Xvfb (tela virtual) e dependências do navegador
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb
+          pip install -r requirements.txt
+          playwright install --with-deps chromium
+
+      - name: Escrever credencial do Firebase (projeto botorion2)
+        env:
+          FIREBASE_BOTORION2_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_EPROC_JSON }}
+        run: |
+          echo "$FIREBASE_BOTORION2_JSON" > firebase-service-account2.json
+
+      - name: Rodar o bot dentro do Xvfb (loop contínuo até 17h ou 6h de execução)
+        env:
+          BOT_CONFIG_JSON: ${{ secrets.BOT_CONFIG_JSON }}
+          EPROC_RJ_USUARIO: ${{ secrets.EPROC_RJ_USUARIO }}
+          EPROC_RJ_SENHA: ${{ secrets.EPROC_RJ_SENHA }}
+          EPROC_RJ_TOTP_SECRET: ${{ secrets.EPROC_RJ_TOTP_SECRET }}
+          EPROC_RS_USUARIO: ${{ secrets.EPROC_RS_USUARIO }}
+          EPROC_RS_SENHA: ${{ secrets.EPROC_RS_SENHA }}
+          EPROC_RS_TOTP_SECRET: ${{ secrets.EPROC_RS_TOTP_SECRET }}
+          IGNORAR_HORARIO: ${{ github.event.inputs.ignorar_horario }}
+        run: xvfb-run -a python bot_eproc1.py
