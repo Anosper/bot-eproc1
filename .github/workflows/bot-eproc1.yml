@@ -50,4 +50,5 @@ jobs:
           EPROC_RS_SENHA: ${{ secrets.EPROC_RS_SENHA }}
           EPROC_RS_TOTP_SECRET: ${{ secrets.EPROC_RS_TOTP_SECRET }}
           IGNORAR_HORARIO: ${{ github.event.inputs.ignorar_horario }}
+          PYTHONUNBUFFERED: "1"
         run: xvfb-run -a python bot_eproc1.py
