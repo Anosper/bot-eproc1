@@ -245,6 +245,21 @@ def parece_tela_de_login_eproc(pagina):
     return False
 
 
+def fechar_banner_cookies_eproc(pagina):
+    # Sites .jus.br costumam ter banner de cookies/LGPD que pode
+    # ficar sobrepondo o botão e atrapalhar o clique — tentamos
+    # fechar antes, em qualquer tribunal (inofensivo se não existir).
+    try:
+        for texto_botao in ["Aceitar", "Concordar", "Ok", "Fechar", "Aceito"]:
+            botao_cookie = pagina.get_by_role("button", name=re.compile(texto_botao, re.IGNORECASE))
+            if botao_cookie.count() > 0 and botao_cookie.first.is_visible():
+                botao_cookie.first.click()
+                pagina.wait_for_timeout(500)
+                return
+    except Exception:
+        pass
+
+
 def tentar_login_usuario_senha_eproc(pagina, contexto, usuario, senha):
     if not usuario or not senha:
         print("ERRO: usuário e/ou senha não definidos no .env para este tribunal.")
@@ -480,6 +495,61 @@ def _clicar_link_por_href_texto(sessao, url_alvo, texto_regex, timeout_aparecer_
         return None, False
 
 
+def localizar_e_clicar_acesso_sc(sessao, tribunal):
+    pagina = sessao.pagina
+    url_direto = tribunal["url_direto"]
+    texto_link = tribunal["texto_link_regex"]
+
+    seletor_href = f"a[href='{url_direto}']"
+    seletor_div_texto = "div.tjsc-text-break"
+    achou_link = False
+    try:
+        pagina.wait_for_selector(f"{seletor_div_texto}, {seletor_href}", state="visible", timeout=10000)
+        achou_link = True
+    except Exception:
+        print(f"[{tribunal['nome']}] Link não apareceu em 10s — vou abrir a URL do eproc diretamente.")
+
+    pagina_login = None
+    clicou_automatico = False
+
+    if achou_link:
+        link_eproc = None
+        div_texto = pagina.locator("div.tjsc-text-break").filter(has_text=texto_link)
+        if div_texto.count() == 0:
+            div_texto = pagina.locator("div.tjsc-text-break")
+        if div_texto.count() > 0:
+            ancestor_link = div_texto.first.locator("xpath=ancestor::a[1]")
+            if ancestor_link.count() > 0:
+                link_eproc = ancestor_link
+
+        if link_eproc is None or link_eproc.count() == 0:
+            link_eproc = pagina.locator(seletor_href)
+
+        if link_eproc.count() > 0:
+            url_antes_do_clique = pagina.url
+            try:
+                link_eproc.first.scroll_into_view_if_needed(timeout=5000)
+            except Exception:
+                pass
+            try:
+                with sessao.contexto.expect_page(timeout=3000) as info_pagina_nova:
+                    link_eproc.first.click()
+                pagina_login = info_pagina_nova.value
+                clicou_automatico = True
+                print(f"[{tribunal['nome']}] Clique automático funcionou — abriu em aba nova.")
+            except Exception:
+                try:
+                    pagina.wait_for_url(lambda url: url != url_antes_do_clique, timeout=10000)
+                except Exception:
+                    pass
+                if pagina.url != url_antes_do_clique:
+                    pagina_login = pagina
+                    clicou_automatico = True
+                    print(f"[{tribunal['nome']}] Navegação confirmada na mesma aba.")
+
+    return pagina_login, clicou_automatico
+
+
 def localizar_e_clicar_acesso_eproc(sessao, tribunal):
     modo = tribunal.get("modo_link")
     if modo == "img_alt":
@@ -491,6 +561,8 @@ def localizar_e_clicar_acesso_eproc(sessao, tribunal):
             tribunal["texto_link_regex"],
             timeout_aparecer_ms=tribunal.get("timeout_aparecer_link_ms", 40000),
         )
+    if modo == "sc":
+        return localizar_e_clicar_acesso_sc(sessao, tribunal)
     return None, False
 
 
@@ -812,6 +884,109 @@ def abrir_primeiro_processo_eproc(pagina, contexto):
     return processo_pagina
 
 
+# ============================================================
+# SELEÇÃO POR ANO ATUAL (só usada por tribunais com
+# usa_filtro_ano_atual=True, ex: TJSC) — a pesquisa por CNPJ
+# retorna o histórico inteiro da empresa, então filtramos pelos
+# processos abertos neste ano em vez de sempre pegar o primeiro.
+# ============================================================
+def ordenar_por_data_autuacao_desc(pagina):
+    th_data = pagina.get_by_role("columnheader", name=re.compile("Data de Autua", re.IGNORECASE))
+    if th_data.count() == 0:
+        th_data = pagina.locator("th").filter(has_text=re.compile(r"Data de Autua", re.IGNORECASE))
+
+    if th_data.count() == 0:
+        print("ERRO: não encontrei o cabeçalho 'Data de Autuação' para ordenar.")
+        return False
+
+    alvo = th_data.first
+    for tentativa in range(2):
+        try:
+            alvo.click()
+        except Exception as erro:
+            print("Erro ao clicar no cabeçalho 'Data de Autuação':", erro)
+            return False
+        pagina.wait_for_timeout(1500)
+        try:
+            classe_atual = alvo.get_attribute("class") or ""
+        except Exception:
+            classe_atual = ""
+        if "sorting_desc" in classe_atual.lower():
+            return True
+
+    return True
+
+
+def garantir_resultados_com_ano(pagina, timeout_geral=150):
+    processos = aguardar_resultados_consulta_eproc(pagina, timeout_segundos=timeout_geral)
+    if processos.count() > 0:
+        return processos
+
+    print()
+    print("Não identifiquei o ano no número do processo — tentando ordenar por")
+    print("'Data de Autuação' (mais recentes primeiro) antes de desistir...")
+    ordenou = ordenar_por_data_autuacao_desc(pagina)
+
+    if ordenou:
+        pagina.wait_for_timeout(2000)
+        processos = aguardar_resultados_consulta_eproc(pagina, timeout_segundos=60)
+        if processos.count() > 0:
+            return processos
+
+    print()
+    print("Mesmo depois de ordenar, não identifiquei o ano no número do processo")
+    print("— vou abrir o primeiro processo da lista mesmo assim, usando um")
+    print("padrão de número mais largo.")
+    padrao_numero = re.compile(r"\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}")
+    for segundo in range(30):
+        try:
+            processos = pagina.locator("a").filter(has_text=PADRAO_NUMERO_PROCESSO_GENERICO)
+            if processos.count() > 0:
+                return processos
+        except Exception:
+            pass
+        pagina.wait_for_timeout(1000)
+    return pagina.locator("a").filter(has_text=PADRAO_NUMERO_PROCESSO_GENERICO)
+
+
+def filtrar_indices_ano_atual(processos, ano=None):
+    ano = ano or datetime.now().year
+    padrao_ano_atual = re.compile(r"-\d{2}\." + str(ano) + r"\.")
+    indices = []
+    total = processos.count()
+    for i in range(total):
+        try:
+            texto = processos.nth(i).inner_text().strip()
+        except Exception:
+            continue
+        if padrao_ano_atual.search(texto):
+            indices.append(i)
+    return indices
+
+
+def abrir_processo_por_indice_eproc(pagina, contexto, processos, indice):
+    quantidade = processos.count()
+    if quantidade == 0 or indice >= quantidade:
+        print("Índice de processo inválido — nada para clicar.")
+        return None
+
+    alvo = processos.nth(indice)
+    processo_pagina = None
+    try:
+        with contexto.expect_page(timeout=15000) as info_popup:
+            alvo.click()
+        processo_pagina = info_popup.value
+    except Exception:
+        processo_pagina = pagina
+
+    try:
+        processo_pagina.wait_for_load_state("domcontentloaded", timeout=30000)
+    except Exception:
+        pass
+    processo_pagina.wait_for_timeout(2000)
+    return processo_pagina
+
+
 def obter_texto_coluna_parte_eproc(pagina, texto_cabecalho, texto_cabecalho_oposto):
     try:
         celulas_cabecalho = pagina.locator("th, td").filter(
@@ -958,6 +1133,11 @@ PADRAO_DOCUMENTO_PARENTESES_EPROC = re.compile(
     r"\((\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}|\d{3}\.\d{3}\.\d{3}-\d{2})\)"
 )
 
+# Só usado pelo TJSC (usa_filtro_ano_atual=True) — padrão mais largo,
+# sem exigir o ano, só como último recurso quando nem o padrão
+# completo nem a ordenação por Data de Autuação resolvem.
+PADRAO_NUMERO_PROCESSO_GENERICO = re.compile(r"\d{7}-\d{2}\.\S{3,20}")
+
 
 # ============================================================
 # LOGIN (sem certificado — só usuário/senha/2FA)
@@ -976,7 +1156,17 @@ def fazer_login_eproc(sessao, tribunal):
     except Exception:
         pass
 
+    fechar_banner_cookies_eproc(sessao.pagina)
+
     pagina_login, clicou_automatico = localizar_e_clicar_acesso_eproc(sessao, tribunal)
+
+    if not clicou_automatico and tribunal.get("url_direto"):
+        # Fallback direto: navega para a URL do eproc conhecida, sem
+        # depender de achar/clicar em elemento nenhum na página.
+        print(f"[{tribunal['nome']}] Abrindo diretamente: {tribunal['url_direto']}")
+        if navegar_com_retry(sessao.pagina, tribunal["url_direto"], tentativas=3, timeout=60000):
+            pagina_login = sessao.pagina
+            clicou_automatico = True
 
     if not clicou_automatico:
         print(f"[{tribunal['nome']}] Não consegui abrir a tela de login automaticamente — pulando este ciclo.")
@@ -1026,6 +1216,12 @@ def fazer_login_eproc(sessao, tribunal):
             break
 
     print(f"[{tribunal['nome']}] Login concluído (ou tempo esgotado). URL atual:", sessao.pagina.url)
+
+    # Rede de segurança: em alguns tribunais a tela de 2FA pode
+    # aparecer só DEPOIS de já termos saído da URL de autenticação
+    # (como um modal na própria página inicial do eproc).
+    tratar_totp_se_necessario_eproc(sessao.pagina, totp_secret, timeout_segundos=20)
+
     return True
 
 
@@ -1086,24 +1282,62 @@ def varrer_cnpjs_e_classes_eproc(sessao, tribunal):
             except Exception:
                 pass
 
-            processos = aguardar_resultados_consulta_eproc(pagina, timeout_segundos=timeout_resultados)
-            quantidade = processos.count()
-            print(f"[{tribunal['nome']}] Processos encontrados: {quantidade}")
+            usa_filtro_ano_atual = tribunal.get("usa_filtro_ano_atual", False)
 
-            if quantidade == 0:
-                continue
+            if usa_filtro_ano_atual:
+                # TJSC: a pesquisa por CNPJ retorna o histórico inteiro
+                # da empresa — filtramos pelos processos do ano atual
+                # em vez de sempre pegar o primeiro resultado.
+                processos = garantir_resultados_com_ano(pagina, timeout_geral=timeout_resultados)
+                quantidade = processos.count()
+                print(f"[{tribunal['nome']}] Processos encontrados: {quantidade}")
 
-            try:
-                numero_processo = processos.first.inner_text().strip()
-            except Exception:
-                numero_processo = None
+                if quantidade == 0:
+                    continue
 
-            if processo_existe_no_firebase(numero_processo):
-                continue
+                indices_ano_atual = filtrar_indices_ano_atual(processos)
+                if not indices_ano_atual:
+                    print(
+                        f"[{tribunal['nome']}] Nenhum processo de {datetime.now().year} "
+                        "encontrado nesta pesquisa (só processos antigos) — pulando."
+                    )
+                    continue
 
-            processo_pagina = abrir_primeiro_processo_eproc(pagina, contexto)
-            if processo_pagina is None:
-                continue
+                indice_escolhido = indices_ano_atual[0]
+
+                try:
+                    numero_processo = processos.nth(indice_escolhido).inner_text().strip()
+                except Exception:
+                    numero_processo = None
+
+                if processo_existe_no_firebase(numero_processo):
+                    continue
+
+                processo_pagina = abrir_processo_por_indice_eproc(pagina, contexto, processos, indice_escolhido)
+                if processo_pagina is None:
+                    continue
+
+            else:
+                # TJRJ (e padrão geral): pega sempre o primeiro
+                # resultado, sem filtro de ano.
+                processos = aguardar_resultados_consulta_eproc(pagina, timeout_segundos=timeout_resultados)
+                quantidade = processos.count()
+                print(f"[{tribunal['nome']}] Processos encontrados: {quantidade}")
+
+                if quantidade == 0:
+                    continue
+
+                try:
+                    numero_processo = processos.first.inner_text().strip()
+                except Exception:
+                    numero_processo = None
+
+                if processo_existe_no_firebase(numero_processo):
+                    continue
+
+                processo_pagina = abrir_primeiro_processo_eproc(pagina, contexto)
+                if processo_pagina is None:
+                    continue
 
             autor, documento_autor, reu, documento_reu = extrair_partes_exequente_executado_eproc(
                 processo_pagina
@@ -1155,7 +1389,7 @@ with sync_playwright() as p:
 
     print()
     print("==========================================")
-    print(" BOT EPROC1 (TJRJ + TJRS) INICIADO")
+    print(" BOT EPROC1 (TJRJ + TJSC) INICIADO")
     print("==========================================")
     print("Tribunais:", ", ".join(t["nome"] for t in EPROC_TRIBUNAIS))
     print(f"Valor mínimo da causa para salvar: {formatar_moeda_br_eproc(VALOR_MINIMO_CAUSA_EPROC)}")
