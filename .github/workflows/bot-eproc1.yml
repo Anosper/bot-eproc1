@@ -46,9 +46,9 @@ jobs:
           EPROC_RJ_USUARIO: ${{ secrets.EPROC_RJ_USUARIO }}
           EPROC_RJ_SENHA: ${{ secrets.EPROC_RJ_SENHA }}
           EPROC_RJ_TOTP_SECRET: ${{ secrets.EPROC_RJ_TOTP_SECRET }}
-          EPROC_RS_USUARIO: ${{ secrets.EPROC_RS_USUARIO }}
-          EPROC_RS_SENHA: ${{ secrets.EPROC_RS_SENHA }}
-          EPROC_RS_TOTP_SECRET: ${{ secrets.EPROC_RS_TOTP_SECRET }}
+          EPROC_SC_USUARIO: ${{ secrets.EPROC_SC_USUARIO }}
+          EPROC_SC_SENHA: ${{ secrets.EPROC_SC_SENHA }}
+          EPROC_SC_TOTP_SECRET: ${{ secrets.EPROC_SC_TOTP_SECRET }}
           IGNORAR_HORARIO: ${{ github.event.inputs.ignorar_horario }}
           PYTHONUNBUFFERED: "1"
         run: xvfb-run -a python bot_eproc1.py
