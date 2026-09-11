@@ -1,17 +1,10 @@
-name: Bot eproc1 (TJRJ + TJRS) - captação de processos
+name: Bot eproc TODOS (RJ + SC + MG + TO + AC) - teste de captação
 
 on:
   schedule:
-    # Mesma lógica do PJe: 6h de teto por execução do GitHub
-    # Actions, expediente de 9h (8h-17h Brasília) — 2 disparos.
     - cron: '0 11 * * 1-5'   # 08:00 em Brasília
     - cron: '0 17 * * 1-5'   # 14:00 em Brasília
-  workflow_dispatch:
-    inputs:
-      ignorar_horario:
-        description: 'Rodar mesmo fora da janela 8h-17h (só para testes manuais)'
-        type: boolean
-        default: false
+  workflow_dispatch: {}
 
 jobs:
   captar-processos:
@@ -36,19 +29,40 @@ jobs:
 
       - name: Escrever credencial do Firebase (projeto botorion2)
         env:
-          FIREBASE_BOTORION2_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_EPROC_JSON }}
+          FIREBASE_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_EPROC_JSON }}
         run: |
-          echo "$FIREBASE_BOTORION2_JSON" > firebase-service-account2.json
+          echo "$FIREBASE_JSON" > firebase-service-account-eproc.json
 
-      - name: Rodar o bot dentro do Xvfb (loop contínuo até 17h ou 6h de execução)
+      - name: Rodar o bot dentro do Xvfb (loop contínuo até o timeout do job)
         env:
-          BOT_CONFIG_JSON: ${{ secrets.BOT_CONFIG_JSON }}
+          # TJRJ
           EPROC_RJ_USUARIO: ${{ secrets.EPROC_RJ_USUARIO }}
           EPROC_RJ_SENHA: ${{ secrets.EPROC_RJ_SENHA }}
           EPROC_RJ_TOTP_SECRET: ${{ secrets.EPROC_RJ_TOTP_SECRET }}
+          # TJSC
           EPROC_SC_USUARIO: ${{ secrets.EPROC_SC_USUARIO }}
           EPROC_SC_SENHA: ${{ secrets.EPROC_SC_SENHA }}
           EPROC_SC_TOTP_SECRET: ${{ secrets.EPROC_SC_TOTP_SECRET }}
-          IGNORAR_HORARIO: ${{ github.event.inputs.ignorar_horario }}
+          # TJMG
+          EPROC_MG_USUARIO: ${{ secrets.EPROC_MG_USUARIO }}
+          EPROC_MG_SENHA: ${{ secrets.EPROC_MG_SENHA }}
+          EPROC_MG_TOTP_SECRET: ${{ secrets.EPROC_MG_TOTP_SECRET }}
+          # TJTO
+          EPROC_TO_USUARIO: ${{ secrets.EPROC_TO_USUARIO }}
+          EPROC_TO_SENHA: ${{ secrets.EPROC_TO_SENHA }}
+          EPROC_TO_TOTP_SECRET: ${{ secrets.EPROC_TO_TOTP_SECRET }}
+          # TJAC
+          EPROC_AC_USUARIO: ${{ secrets.EPROC_AC_USUARIO }}
+          EPROC_AC_SENHA: ${{ secrets.EPROC_AC_SENHA }}
+          EPROC_AC_TOTP_SECRET: ${{ secrets.EPROC_AC_TOTP_SECRET }}
           PYTHONUNBUFFERED: "1"
-        run: xvfb-run -a python bot_eproc1.py
+        run: xvfb-run -a python bot_eproc_todos.py
+
+      - name: Publicar screenshots de diagnóstico (se algum tribunal falhou)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-eproc-todos
+          path: debug_eproc_todos/
+          if-no-files-found: ignore
+          retention-days: 5
