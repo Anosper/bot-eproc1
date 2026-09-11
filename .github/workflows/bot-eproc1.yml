@@ -1,10 +1,17 @@
-name: Bot eproc TODOS (RJ + SC + MG + TO + AC) - teste de captação
+name: Bot eproc (TJRJ + TJSC + TJMG + TJTO + TJAC) - captação de processos
 
 on:
   schedule:
+    # Mesma lógica do PJe: 6h de teto por execução do GitHub
+    # Actions, expediente de 9h (8h-17h Brasília) — 2 disparos.
     - cron: '0 11 * * 1-5'   # 08:00 em Brasília
     - cron: '0 17 * * 1-5'   # 14:00 em Brasília
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      ignorar_horario:
+        description: 'Rodar mesmo fora da janela 8h-17h (só para testes manuais)'
+        type: boolean
+        default: false
 
 jobs:
   captar-processos:
@@ -33,7 +40,7 @@ jobs:
         run: |
           echo "$FIREBASE_JSON" > firebase-service-account-eproc.json
 
-      - name: Rodar o bot dentro do Xvfb (loop contínuo até o timeout do job)
+      - name: Rodar o bot dentro do Xvfb (loop contínuo até 17h ou 6h de execução)
         env:
           # TJRJ
           EPROC_RJ_USUARIO: ${{ secrets.EPROC_RJ_USUARIO }}
@@ -55,14 +62,15 @@ jobs:
           EPROC_AC_USUARIO: ${{ secrets.EPROC_AC_USUARIO }}
           EPROC_AC_SENHA: ${{ secrets.EPROC_AC_SENHA }}
           EPROC_AC_TOTP_SECRET: ${{ secrets.EPROC_AC_TOTP_SECRET }}
+          IGNORAR_HORARIO: ${{ github.event.inputs.ignorar_horario }}
           PYTHONUNBUFFERED: "1"
-        run: xvfb-run -a python bot_eproc_todos.py
+        run: xvfb-run -a python bot_eproc1.py
 
       - name: Publicar screenshots de diagnóstico (se algum tribunal falhou)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: debug-eproc-todos
+          name: debug-eproc
           path: debug_eproc_todos/
           if-no-files-found: ignore
           retention-days: 5
