@@ -1425,7 +1425,7 @@ def _clicar_acesso_tjac(sessao, tribunal):
 
     seletor_resultado = f"a[href^='{prefixo_href}']"
     try:
-        pagina.wait_for_selector(seletor_resultado, state="visible", timeout=10000)
+        pagina.wait_for_selector(seletor_resultado, state="visible", timeout=20000)
     except Exception:
         pass
 
@@ -1509,7 +1509,15 @@ def fazer_login_eproc(sessao, tribunal):
     pagina_login, clicou_automatico = localizar_e_clicar_acesso(sessao, tribunal)
 
     if not clicou_automatico and tribunal.get("url_direto"):
-        print(f"[{nome}] Abrindo diretamente: {tribunal['url_direto']}")
+        # Diagnóstico ANTES de cair pro fallback — pra sabermos por
+        # que o clique automático no portal falhou (ex: banner não
+        # fechou, botão não carregou a tempo, mudou de layout).
+        diagnosticar_tela(sessao.pagina, f"{nome}_clique_portal_falhou")
+        print(
+            f"[{nome}] Clique automático no portal não funcionou — "
+            f"caindo para o link de fallback (pode ser de uso único, "
+            f"nem sempre funciona): {tribunal['url_direto']}"
+        )
         if navegar_com_retry(sessao.pagina, tribunal["url_direto"], tentativas=3, timeout=60000):
             pagina_login = sessao.pagina
             clicou_automatico = True
