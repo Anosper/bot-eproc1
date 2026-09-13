@@ -1487,6 +1487,58 @@ def localizar_e_clicar_acesso(sessao, tribunal):
 # ============================================================
 # LOGIN COMPLETO (genérico para todos os tribunais)
 # ============================================================
+def tentar_passar_tela_ja_logado(pagina, nome_tribunal, tentativas_espera=10):
+    """
+    Detecta a tela do Keycloak "Você já está logado" (acontece em
+    fluxos de broker/OAuth quando já existe uma sessão válida em
+    algum ponto da cadeia) — ela normalmente tem um link pra
+    continuar, ou redireciona sozinha depois de alguns segundos.
+    Sem isso, o bot ficava parado nessa tela achando que já tinha
+    terminado o login (a URL já tinha saído do domínio de auth).
+    """
+    try:
+        corpo = pagina.locator("body").inner_text()
+    except Exception:
+        return False
+    if "já está logado" not in corpo.lower() and "already logged in" not in corpo.lower():
+        return False
+
+    print(f"[{nome_tribunal}] Detectei a tela 'Você já está logado' do Keycloak — tentando continuar...")
+
+    for seletor in ["a", "button"]:
+        elementos = pagina.locator(seletor)
+        try:
+            total = elementos.count()
+        except Exception:
+            total = 0
+        for i in range(total):
+            try:
+                if not elementos.nth(i).is_visible():
+                    continue
+                texto_el = elementos.nth(i).inner_text().strip()
+            except Exception:
+                continue
+            if texto_el:
+                print(f"[{nome_tribunal}] Clicando em elemento encontrado nessa tela: {texto_el!r}")
+                try:
+                    elementos.nth(i).click()
+                    pagina.wait_for_timeout(2000)
+                    return True
+                except Exception:
+                    continue
+
+    # Não achou nada clicável — espera um pouco, pode redirecionar
+    # sozinho via JS/meta-refresh.
+    print(f"[{nome_tribunal}] Nenhum link clicável encontrado — aguardando redirecionamento automático...")
+    url_antes = pagina.url
+    for _ in range(tentativas_espera):
+        pagina.wait_for_timeout(1000)
+        if pagina.url != url_antes:
+            print(f"[{nome_tribunal}] A página redirecionou sozinha.")
+            return True
+    return False
+
+
 def fazer_login_eproc(sessao, tribunal):
     nome = tribunal["nome"]
     print()
@@ -1541,6 +1593,16 @@ def fazer_login_eproc(sessao, tribunal):
     except Exception:
         pass
 
+    # Trata a tela "Você já está logado" do Keycloak logo de cara,
+    # caso apareça direto depois do clique no portal (antes mesmo de
+    # chegar num formulário de login ou na Consulta Processual).
+    if tentar_passar_tela_ja_logado(sessao.pagina, nome):
+        try:
+            sessao.pagina.wait_for_load_state("domcontentloaded", timeout=30000)
+        except Exception:
+            pass
+        sessao.pagina.wait_for_timeout(1000)
+
     # Sessão já pode estar ativa (cookies salvos de uma execução
     # anterior) — tenta abrir a Consulta Processual direto antes de
     # qualquer login.
@@ -1581,6 +1643,17 @@ def fazer_login_eproc(sessao, tribunal):
             print(f"[{nome}] Ainda na tela de autenticação... ({segundo + 1}s)")
 
     print(f"[{nome}] Login concluído (ou tempo esgotado). URL atual:", sessao.pagina.url)
+
+    # Trata a tela "Você já está logado" do Keycloak, se aparecer
+    # (comum em fluxos de broker/OAuth) — sem isso, o bot ficava
+    # parado achando que já tinha terminado.
+    if tentar_passar_tela_ja_logado(sessao.pagina, nome):
+        try:
+            sessao.pagina.wait_for_load_state("domcontentloaded", timeout=30000)
+        except Exception:
+            pass
+        sessao.pagina.wait_for_timeout(1000)
+        print(f"[{nome}] URL após passar pela tela 'já logado':", sessao.pagina.url)
 
     # Rede de segurança: em alguns tribunais o 2FA só aparece depois
     # de já termos saído da URL de autenticação.
