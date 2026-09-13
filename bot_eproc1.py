@@ -306,7 +306,7 @@ def fechar_banner_cookies(pagina):
 # ============================================================
 # FIREBASE
 # ============================================================
-NOME_ARQUIVO_FIREBASE = "firebase-service-account-eproc.json"
+NOME_ARQUIVO_FIREBASE = "firebase-service-account2.json"
 
 print()
 print("==========================================")
