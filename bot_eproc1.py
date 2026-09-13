@@ -1605,6 +1605,12 @@ def processar_eproc_tribunal(sessao, tribunal):
         diagnosticar_tela(sessao.pagina, f"{nome}_erro_abrir_consulta")
         return False, "Não consegui abrir a tela de Consulta Processual"
 
+    # Reporta "rodando" JÁ AQUI (login + Consulta Processual ok),
+    # antes de começar o loop de CNPJ x Classe — que pode levar
+    # vários minutos. Sem isso, o painel ficava com o status "parado"
+    # de um ciclo anterior até TODAS as combinações terminarem.
+    status_bots.atualizar_status(nome, NOME_DO_GRUPO, "rodando")
+
     pagina = sessao.pagina
     contexto = sessao.contexto
     timeout_resultados = tribunal.get("timeout_resultados", 150)
@@ -1614,6 +1620,11 @@ def processar_eproc_tribunal(sessao, tribunal):
         for indice_classe, classe_atual in enumerate(tribunal["classes"]):
             print()
             print(f"--- {nome} / CNPJ {cnpj_atual} / {classe_atual} ---")
+            # Reafirma "rodando" a cada combinação — se travar numa
+            # específica, o "atualizadoEm" para de avançar mesmo com
+            # o heartbeat do grupo continuando (ajuda a diferenciar
+            # "tribunal travado" de "processo inteiro morto").
+            status_bots.atualizar_status(nome, NOME_DO_GRUPO, "rodando")
 
             if indice_cnpj == 0 and indice_classe == 0:
                 preencheu = preencher_pesquisa_cpf_cnpj(pagina, cnpj_atual, classe_atual)
