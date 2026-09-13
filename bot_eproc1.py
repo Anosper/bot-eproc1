@@ -12,6 +12,8 @@ import firebase_admin
 from firebase_admin import credentials
 from firebase_admin import firestore
 
+import status_bots
+
 # ============================================================
 # SUPORTE A "PULAR ESPERA" APERTANDO ENTER NO TERMINAL
 # (não faz nada no GitHub Actions, sem terminal interativo — mas não
@@ -110,6 +112,8 @@ ARQUIVO_SESSAO_EPROC = "sessao_eproc_todos.json"
 INTERVALO_ENTRE_VARREDURAS = 30
 VALOR_MINIMO_CAUSA = float(os.getenv("VALOR_MINIMO_CAUSA_EPROC", "10000"))
 
+NOME_DO_GRUPO = "eproc"
+
 CLASSES_EPROC_PADRAO = [
     "Execução de Título Extrajudicial",
     "Busca e Apreensão em Alienação Fiduciária",
@@ -142,21 +146,6 @@ EPROC_TRIBUNAIS = [
             "60.746.948/0001-12",
             "90.400.888/0001-42",
         ],
-        "classes": CLASSES_EPROC_PADRAO,
-        "segundos_espera_geral": 240,
-        "timeout_resultados": 150,
-    },
-    {
-        "nome": "TJSC",
-        "usuario_env": "EPROC_SC_USUARIO",
-        "senha_env": "EPROC_SC_SENHA",
-        "totp_secret_env": "EPROC_SC_TOTP_SECRET",
-        "url_portal": "https://www.tjsc.jus.br/web/processo-eletronico-eproc",
-        "modo_link": "sc",
-        "url_direto": "https://eproc1g.tjsc.jus.br/eproc/",
-        "texto_link_regex": re.compile(r"Eproc\s+Primeiro\s+Grau", re.IGNORECASE),
-        "usa_certificado": False,  # sem humano pra clicar em CI — vai direto pra usuário/senha, igual o RJ
-        "cnpjs": CNPJS_PADRAO_SEM_00,
         "classes": CLASSES_EPROC_PADRAO,
         "segundos_espera_geral": 240,
         "timeout_resultados": 150,
@@ -1296,51 +1285,6 @@ def _clicar_link_por_img_alt(sessao, alt_padrao):
         return None, False
 
 
-def _clicar_acesso_sc(sessao, tribunal):
-    pagina = sessao.pagina
-    url_direto = tribunal["url_direto"]
-    texto_link = tribunal["texto_link_regex"]
-
-    seletor_href = f"a[href='{url_direto}']"
-    seletor_div_texto = "div.tjsc-text-break"
-    try:
-        pagina.wait_for_selector(f"{seletor_div_texto}, {seletor_href}", state="visible", timeout=10000)
-    except Exception:
-        pass
-
-    link_eproc = None
-    div_texto = pagina.locator(seletor_div_texto).filter(has_text=texto_link)
-    if div_texto.count() == 0:
-        div_texto = pagina.locator(seletor_div_texto)
-    if div_texto.count() > 0:
-        ancestor_link = div_texto.first.locator("xpath=ancestor::a[1]")
-        if ancestor_link.count() > 0:
-            link_eproc = ancestor_link
-    if link_eproc is None or link_eproc.count() == 0:
-        link_eproc = pagina.locator(seletor_href)
-
-    if link_eproc.count() == 0:
-        return None, False
-
-    url_antes_do_clique = pagina.url
-    try:
-        link_eproc.first.scroll_into_view_if_needed(timeout=5000)
-    except Exception:
-        pass
-    try:
-        with sessao.contexto.expect_page(timeout=3000) as info_pagina_nova:
-            link_eproc.first.click()
-        return info_pagina_nova.value, True
-    except Exception:
-        try:
-            pagina.wait_for_url(lambda url: url != url_antes_do_clique, timeout=10000)
-        except Exception:
-            pass
-        if pagina.url != url_antes_do_clique:
-            return pagina, True
-        return None, False
-
-
 def _clicar_acesso_mg(sessao, tribunal):
     pagina = sessao.pagina
     contexto = sessao.contexto
@@ -1530,8 +1474,6 @@ def localizar_e_clicar_acesso(sessao, tribunal):
     modo = tribunal.get("modo_link")
     if modo == "img_alt":
         return _clicar_link_por_img_alt(sessao, tribunal["img_alt_padrao"])
-    if modo == "sc":
-        return _clicar_acesso_sc(sessao, tribunal)
     if modo == "mg":
         return _clicar_acesso_mg(sessao, tribunal)
     if modo == "tjto":
@@ -1643,10 +1585,11 @@ def fazer_login_eproc(sessao, tribunal):
 # VARREDURA DE CNPJs x CLASSES (genérico para todos)
 # ============================================================
 def processar_eproc_tribunal(sessao, tribunal):
+    """Retorna (sucesso: bool, detalhe_erro: str|None)."""
     nome = tribunal["nome"]
 
     if not fazer_login_eproc(sessao, tribunal):
-        return
+        return False, "Falha no login (usuário/senha ou 2FA)"
 
     sessao.salvar_sessao()
 
@@ -1660,7 +1603,7 @@ def processar_eproc_tribunal(sessao, tribunal):
     if not consulta_pronta:
         print(f"[{nome}] Não consegui abrir a tela de Consulta Processual.")
         diagnosticar_tela(sessao.pagina, f"{nome}_erro_abrir_consulta")
-        return
+        return False, "Não consegui abrir a tela de Consulta Processual"
 
     pagina = sessao.pagina
     contexto = sessao.contexto
@@ -1678,7 +1621,7 @@ def processar_eproc_tribunal(sessao, tribunal):
                     print(f"[{nome}] Não consegui preencher a pesquisa inicial — pulando este tribunal.")
                     diagnosticar_tela(pagina, f"{nome}_erro_preencher_pesquisa")
                     sessao.pagina = pagina
-                    return
+                    return False, "Não consegui preencher a pesquisa inicial (Tipo de Pesquisa/CPF/Classe)"
             else:
                 sucesso_filtro = False
                 if selecionar_tipo_pesquisa(pagina, "CPF/CNPJ"):
@@ -1776,6 +1719,7 @@ def processar_eproc_tribunal(sessao, tribunal):
     sessao.pagina = pagina
     print()
     print(f"[{nome}] Ciclo de pesquisas concluído.")
+    return True, None
 
 
 # ============================================================
@@ -1793,7 +1737,11 @@ with sync_playwright() as p:
     print("Tribunais:", ", ".join(t["nome"] for t in EPROC_TRIBUNAIS))
     print(f"Valor mínimo da causa para salvar: {formatar_moeda_br(VALOR_MINIMO_CAUSA)}")
 
-    while True:
+    status_bots.iniciar_heartbeat(NOME_DO_GRUPO)
+
+    IGNORAR_HORARIO = os.getenv("IGNORAR_HORARIO", "").lower() == "true"
+
+    while IGNORAR_HORARIO or status_bots.horario_permitido():
         print()
         print("##########################################")
         print(" NOVA VARREDURA — TODOS OS TRIBUNAIS")
@@ -1803,13 +1751,35 @@ with sync_playwright() as p:
             resultado_ciclo = {}
             for tribunal in EPROC_TRIBUNAIS:
                 nome_tribunal = tribunal["nome"]
+
+                if not IGNORAR_HORARIO and not status_bots.horario_permitido():
+                    print(f"Passou do horário permitido — parando a varredura em {nome_tribunal}.")
+                    break
+
+                if status_bots.esta_pausado_manualmente(nome_tribunal):
+                    print(f"{nome_tribunal} está pausado manualmente — pulando.")
+                    status_bots.atualizar_status(nome_tribunal, NOME_DO_GRUPO, "pausado")
+                    resultado_ciclo[nome_tribunal] = "pausado manualmente"
+                    continue
+
                 print()
                 print(f"--- {nome_tribunal} (eproc) ---")
                 try:
-                    processar_eproc_tribunal(sessao_eproc, tribunal)
-                    resultado_ciclo[nome_tribunal] = "ok (sem erro fatal)"
+                    sucesso, detalhe_erro = processar_eproc_tribunal(sessao_eproc, tribunal)
+                    if sucesso:
+                        status_bots.atualizar_status(nome_tribunal, NOME_DO_GRUPO, "rodando")
+                        resultado_ciclo[nome_tribunal] = "ok"
+                    else:
+                        status_bots.atualizar_status(
+                            nome_tribunal, NOME_DO_GRUPO, "erro", detalhe_erro=detalhe_erro
+                        )
+                        resultado_ciclo[nome_tribunal] = f"ERRO: {detalhe_erro}"
                 except Exception as erro:
                     print(f"ERRO ao processar {nome_tribunal} (eproc):", type(erro).__name__, erro)
+                    status_bots.atualizar_status(
+                        nome_tribunal, NOME_DO_GRUPO, "erro",
+                        detalhe_erro=f"{type(erro).__name__}: {erro}",
+                    )
                     resultado_ciclo[nome_tribunal] = f"ERRO: {type(erro).__name__}: {erro}"
 
             print()
@@ -1832,5 +1802,10 @@ with sync_playwright() as p:
             print()
             print("ERRO GERAL NO LOOP PRINCIPAL:", type(erro).__name__, erro)
             time.sleep(INTERVALO_ENTRE_VARREDURAS)
+
+    print()
+    print("Fora do horário permitido — encerrando a execução.")
+    for tribunal in EPROC_TRIBUNAIS:
+        status_bots.atualizar_status(tribunal["nome"], NOME_DO_GRUPO, "fora_do_horario")
 
     sessao_eproc.fechar()
