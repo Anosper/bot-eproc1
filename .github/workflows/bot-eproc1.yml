@@ -1,4 +1,4 @@
-name: Bot eproc (TJRJ + TJSC + TJMG + TJTO + TJAC) - captação de processos
+name: Bot eproc (TJRJ + TJMG + TJTO + TJAC) - captação de processos
 
 on:
   schedule:
@@ -46,10 +46,6 @@ jobs:
           EPROC_RJ_USUARIO: ${{ secrets.EPROC_RJ_USUARIO }}
           EPROC_RJ_SENHA: ${{ secrets.EPROC_RJ_SENHA }}
           EPROC_RJ_TOTP_SECRET: ${{ secrets.EPROC_RJ_TOTP_SECRET }}
-          # TJSC
-          EPROC_SC_USUARIO: ${{ secrets.EPROC_SC_USUARIO }}
-          EPROC_SC_SENHA: ${{ secrets.EPROC_SC_SENHA }}
-          EPROC_SC_TOTP_SECRET: ${{ secrets.EPROC_SC_TOTP_SECRET }}
           # TJMG
           EPROC_MG_USUARIO: ${{ secrets.EPROC_MG_USUARIO }}
           EPROC_MG_SENHA: ${{ secrets.EPROC_MG_SENHA }}
