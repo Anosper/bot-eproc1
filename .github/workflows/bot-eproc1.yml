@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       ignorar_horario:
-        description: 'Rodar mesmo fora da janela 8h-18h (só para testes manuais)'
+        description: 'Rodar mesmo fora da janela 8h-17h (só para testes manuais)'
         type: boolean
         default: false
 
@@ -34,11 +34,21 @@ jobs:
           pip install -r requirements.txt
           playwright install --with-deps chromium
 
-      - name: Escrever credencial do Firebase (projeto botorion2)
+      - name: Escrever credencial do Firebase (principal — botorion2)
         env:
           FIREBASE_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_EPROC_JSON }}
         run: |
           echo "$FIREBASE_JSON" > firebase-service-account2.json
+
+      - name: Escrever credenciais do Firebase (failovers — mesmos do bot PJe)
+        env:
+          FAILOVER_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_FAILOVER_JSON }}
+          FAILOVER2_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_FAILOVER2_JSON }}
+          FAILOVER3_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_FAILOVER3_JSON }}
+        run: |
+          echo "$FAILOVER_JSON" > firebase-service-account-failover.json
+          echo "$FAILOVER2_JSON" > firebase-service-account-failover2.json
+          echo "$FAILOVER3_JSON" > firebase-service-account-failover3.json
 
       - name: Rodar o bot dentro do Xvfb (loop contínuo até 17h ou 6h de execução)
         env:
