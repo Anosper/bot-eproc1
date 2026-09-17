@@ -4,3 +4,10 @@ __pycache__/
 sessao_eproc.json
 debug_eproc1/
 firebase-service-account2.json
+firebase-service-account-failover.json
+firebase-service-account-failover2.json
+firebase-service-account-failover3.json
+firebase_quota_state.json
+firebase_quota_state.json.lock
+ultimo_visto.json
+ultimo_visto.json.lock
