@@ -8,10 +8,6 @@ from datetime import datetime, timedelta
 import pyotp
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
-import firebase_admin
-from firebase_admin import credentials
-from firebase_admin import firestore
-
 import status_bots
 
 # ============================================================
@@ -140,7 +136,7 @@ EPROC_TRIBUNAIS = [
         "img_alt_padrao": "Eproc 1",
         "url_direto": None,  # sem fallback direto confirmado para o RJ
         "usa_certificado": False,  # sem humano pra clicar em CI — vai direto pra usuário/senha, igual o RJ
-        "cnpjs": [
+        "valores_busca": [
             "00.000.000/0001-91",
             "60.701.190/0001-04",
             "60.746.948/0001-12",
@@ -163,7 +159,7 @@ EPROC_TRIBUNAIS = [
         ),
         "texto_link_regex": re.compile(r"eproc\s*1[ªa]?\s*Inst[âa]ncia", re.IGNORECASE),
         "usa_certificado": False,  # sem humano pra clicar em CI — vai direto pra usuário/senha, igual o RJ
-        "cnpjs": CNPJS_PADRAO_SEM_00,
+        "valores_busca": CNPJS_PADRAO_SEM_00,
         "classes": CLASSES_EPROC_PADRAO,
         "segundos_espera_geral": 240,
         "timeout_resultados": 150,
@@ -190,7 +186,7 @@ EPROC_TRIBUNAIS = [
         ),
         "texto_link_regex": re.compile(r"EPROC\s*-\s*1[°ºo]?\s*Grau", re.IGNORECASE),
         "usa_certificado": False,  # TJTO nem tem essa opção mesmo
-        "cnpjs": CNPJS_PADRAO_SEM_00,
+        "valores_busca": CNPJS_PADRAO_SEM_00,
         "classes": CLASSES_EPROC_PADRAO,
         "segundos_espera_geral": 240,
         "timeout_resultados": 150,
@@ -218,7 +214,7 @@ EPROC_TRIBUNAIS = [
         "usa_certificado": False,  # sem humano pra clicar em CI — vai direto pra usuário/senha, igual o RJ
         # CONFIRMADO: TJAC usa "00.000.000/0001-91" no lugar de
         # "60.701.190/0001-04" (diferente dos outros).
-        "cnpjs": [
+        "valores_busca": [
             "00.000.000/0001-91",
             "60.746.948/0001-12",
             "90.400.888/0001-42",
@@ -303,20 +299,75 @@ def fechar_banner_cookies(pagina):
         pass
 
 
+def verificar_e_aguardar_cloudflare(pagina, timeout_segundos=60):
+    """
+    Alguns tribunais (ex: TJSP) podem mostrar desafio anti-bot
+    (Cloudflare) em partes do fluxo. Sem humano disponível no
+    servidor (GitHub Actions), só espera passivamente por até
+    timeout_segundos — se não sumir sozinho, segue em frente mesmo
+    assim (não trava o ciclo inteiro).
+    """
+    indicadores = [
+        "performing security verification",
+        "executando verificação de segurança",
+        "confirme que é humano",
+        "confirmar que você é humano",
+        "vamos confirmar que você é humano",
+        "verifying you are human",
+        "human verification",
+        "conclua a verificação de segurança",
+        "checking your browser",
+        "just a moment",
+    ]
+    try:
+        texto = pagina.locator("body").inner_text(timeout=5000).lower()
+    except Exception:
+        return
+    if not any(indicador in texto for indicador in indicadores):
+        return
+
+    print()
+    print("Verificação anti-bot (Cloudflare) detectada — aguardando resolver sozinha...")
+    for segundo in range(timeout_segundos):
+        pagina.wait_for_timeout(1000)
+        try:
+            texto_atual = pagina.locator("body").inner_text(timeout=2000).lower()
+        except Exception:
+            continue
+        if not any(indicador in texto_atual for indicador in indicadores):
+            print("Verificação sumiu sozinha, continuando...")
+            return
+        if (segundo + 1) % 15 == 0:
+            print(f"Ainda aguardando... ({timeout_segundos - (segundo + 1)}s restantes)")
+    print("Aviso: verificação anti-bot não sumiu dentro do tempo — seguindo mesmo assim.")
+
+
 # ============================================================
-# FIREBASE
+# FIREBASE (com failover entre projetos + cache local anti-duplicidade)
 # ============================================================
-NOME_ARQUIVO_FIREBASE = "firebase-service-account2.json"
+from google.api_core.exceptions import ResourceExhausted
 
 print()
 print("==========================================")
-print(" CONECTANDO AO FIREBASE")
+print(" CONECTANDO AO FIREBASE (com failover)")
 print("==========================================")
 try:
-    credencial = credentials.Certificate(NOME_ARQUIVO_FIREBASE)
-    firebase_admin.initialize_app(credencial)
-    db = firestore.client()
-    print("Firebase conectado com sucesso!")
+    from firebase_manager import FirebaseManager
+    from ultimo_visto import UltimoVisto
+
+    fm = FirebaseManager([
+        # "principal" continua sendo o mesmo arquivo de sempre (o
+        # mesmo que o status_bots.py usa por padrão) — os 3
+        # failovers são reaproveitados do bot PJe (mesmos
+        # projetos/credenciais).
+        {"name": "principal", "cred_path": "firebase-service-account2.json"},
+        {"name": "failover", "cred_path": "firebase-service-account-failover.json"},
+        {"name": "failover2", "cred_path": "firebase-service-account-failover2.json"},
+        {"name": "failover3", "cred_path": "firebase-service-account-failover3.json"},
+    ])
+    uv = UltimoVisto()
+    db = fm.client()
+    print(f"Firebase conectado com sucesso! (projeto ativo: {fm.active_project})")
 except Exception as erro:
     print()
     print("==========================================")
@@ -327,19 +378,40 @@ except Exception as erro:
     raise
 
 
-def processo_existe_no_firebase(numero):
+def processo_existe_no_firebase(numero, chave_uv):
+    """
+    `chave_uv` identifica de forma única a combinação de busca atual
+    (ex: "TJRJ||CPF/CNPJ||00.000.000/0001-91||Execução de Título
+    Extrajudicial") — serve pro cache local (UltimoVisto) saber que
+    já viu esse mesmo resultado antes, sem precisar nem consultar o
+    Firestore.
+    """
     if not numero:
         return False
-    try:
-        documento = db.collection("processos").document(numero).get()
-        if documento.exists:
-            print(f"[JÁ EXISTE] {numero}")
-            return True
-        print(f"[NOVO] {numero}")
-        return False
-    except Exception as erro:
-        print("ERRO AO CONSULTAR FIREBASE:", type(erro).__name__, erro)
+
+    if not uv.eh_novo(chave_uv, numero):
+        print(f"[JÁ EXISTE - cache local] {numero}")
         return True
+
+    global db
+    for tentativa in range(2):  # tenta no projeto atual e, se estourar, 1x no próximo
+        try:
+            documento_ref = db.collection("processos").document(numero)
+            documento = fm.get(documento_ref)
+            if documento.exists:
+                print(f"[JÁ EXISTE] {numero}")
+                return True
+            print(f"[NOVO] {numero}")
+            return False
+        except ResourceExhausted:
+            print(f"Cota estourada em '{fm.active_project}'. Trocando de projeto...")
+            db = fm.client()
+        except Exception as erro:
+            print("ERRO AO CONSULTAR FIREBASE:", type(erro).__name__, erro)
+            return True
+
+    print("Nenhum projeto Firebase disponível no momento.")
+    return True
 
 
 def valor_causa_para_float(valor_causa_texto):
@@ -359,7 +431,7 @@ def formatar_moeda_br(valor):
     return f"R$ {texto}"
 
 
-def salvar_processo_no_firebase(dados, tribunal_origem):
+def salvar_processo_no_firebase(dados, tribunal_origem, chave_uv):
     numero = dados.get("numero")
     if not numero:
         print()
@@ -371,24 +443,34 @@ def salvar_processo_no_firebase(dados, tribunal_origem):
     dados["emProcessos"] = True
     dados["data_distribuicao"] = dados["dataCaptacao"]
 
-    try:
-        db.collection("processos").document(numero).set(dados)
-        print()
-        print("==========================================")
-        print(" PROCESSO SALVO NO FIREBASE")
-        print("==========================================")
-        print("Número:", dados.get("numero"))
-        print("Réu:", dados.get("reu"))
-        print("CPF/CNPJ:", dados.get("documento_reu"))
-        print("Classe:", dados.get("classe"))
-        print("Tribunal:", tribunal_origem)
-        print("Autor:", dados.get("autor"))
-        print("Valor:", dados.get("valor_causa"))
-        return True
-    except Exception as erro:
-        print()
-        print("ERRO AO SALVAR NO FIREBASE:", type(erro).__name__, erro)
-        return False
+    global db
+    for tentativa in range(2):
+        try:
+            documento_ref = db.collection("processos").document(numero)
+            fm.set(documento_ref, dados)
+            uv.atualizar(chave_uv, numero)
+            print()
+            print("==========================================")
+            print(" PROCESSO SALVO NO FIREBASE")
+            print("==========================================")
+            print("Número:", dados.get("numero"))
+            print("Réu:", dados.get("reu"))
+            print("CPF/CNPJ:", dados.get("documento_reu"))
+            print("Classe:", dados.get("classe"))
+            print("Tribunal:", tribunal_origem)
+            print("Autor:", dados.get("autor"))
+            print("Valor:", dados.get("valor_causa"))
+            return True
+        except ResourceExhausted:
+            print(f"Cota estourada em '{fm.active_project}'. Trocando de projeto...")
+            db = fm.client()
+        except Exception as erro:
+            print()
+            print("ERRO AO SALVAR NO FIREBASE:", type(erro).__name__, erro)
+            return False
+
+    print("Nenhum projeto Firebase disponível no momento para gravar.")
+    return False
 
 
 def diagnosticar_tela(pagina, rotulo):
@@ -794,6 +876,67 @@ def preencher_cpf_cnpj(pagina, valor):
         return False
 
 
+def preencher_oab(pagina, valor):
+    """
+    Preenche o número da OAB (formato tipo 'SP114904' — sigla do
+    estado + número, sem pontuação). Usa label "OAB" como estratégia
+    principal, com fallback pro primeiro input de texto visível.
+    """
+    campo = None
+    try:
+        loc = pagina.get_by_label(re.compile(r"OAB", re.IGNORECASE))
+        if loc.count() > 0:
+            campo = loc
+    except Exception:
+        campo = None
+    if campo is None or campo.count() == 0:
+        for seletor in ["input[name*='oab' i]", "input[id*='oab' i]"]:
+            loc = pagina.locator(seletor)
+            if loc.count() > 0:
+                campo = loc
+                break
+    if campo is None or campo.count() == 0:
+        loc = pagina.locator("input[type='text']:visible")
+        if loc.count() > 0:
+            campo = loc
+    if campo is None or campo.count() == 0:
+        return False
+
+    alvo = campo.first
+
+    def valor_normalizado(texto):
+        return re.sub(r"[^a-zA-Z0-9]", "", texto or "").upper()
+
+    try:
+        alvo.click()
+        alvo.fill("")
+        alvo.fill(valor)
+        pagina.wait_for_timeout(300)
+
+        valor_atual = alvo.input_value()
+        if valor_normalizado(valor_atual) != valor_normalizado(valor):
+            alvo.click()
+            alvo.press("Control+A")
+            alvo.press("Backspace")
+            alvo.type(valor, delay=50)
+            pagina.wait_for_timeout(300)
+            valor_atual = alvo.input_value()
+            if valor_normalizado(valor_atual) != valor_normalizado(valor):
+                return False
+
+        return True
+    except Exception:
+        return False
+
+
+def preencher_valor_busca(pagina, tipo_pesquisa, valor):
+    """Despacha pro preenchimento certo (CPF/CNPJ ou OAB) conforme o
+    tipo de pesquisa configurado para o tribunal."""
+    if tipo_pesquisa == "OAB":
+        return preencher_oab(pagina, valor)
+    return preencher_cpf_cnpj(pagina, valor)
+
+
 def _localizar_botao_classe_processual(pagina):
     botoes_ms = pagina.locator("button.ms-choice")
     total_botoes = botoes_ms.count()
@@ -916,11 +1059,11 @@ def definir_classe_unica(pagina, texto_marcar):
     return ok_marcar
 
 
-def preencher_pesquisa_cpf_cnpj(pagina, cnpj, classe_texto):
-    if not selecionar_tipo_pesquisa(pagina, "CPF/CNPJ"):
+def preencher_pesquisa_generica(pagina, tipo_pesquisa, valor, classe_texto):
+    if not selecionar_tipo_pesquisa(pagina, tipo_pesquisa):
         return False
     pagina.wait_for_timeout(1000)
-    if not preencher_cpf_cnpj(pagina, cnpj):
+    if not preencher_valor_busca(pagina, tipo_pesquisa, valor):
         return False
     if not definir_classe_unica(pagina, classe_texto):
         return False
@@ -1103,7 +1246,7 @@ def fechar_processo_e_voltar(pagina_principal, processo_pagina):
     return pagina_principal
 
 
-def recarregar_e_refazer_pesquisa(pagina, cnpj_atual, classe_atual, rotulo_tribunal):
+def recarregar_e_refazer_pesquisa(pagina, tipo_pesquisa, valor_busca, classe_atual, rotulo_tribunal):
     """
     Se falhar ao preencher o filtro numa combinação que não é a
     primeira, a página pode ter ficado num estado inconsistente —
@@ -1122,7 +1265,7 @@ def recarregar_e_refazer_pesquisa(pagina, cnpj_atual, classe_atual, rotulo_tribu
         print(f"[{rotulo_tribunal}] Não voltei numa tela válida de Consulta Processual depois do reload.")
         return False
 
-    if not preencher_pesquisa_cpf_cnpj(pagina, cnpj_atual, classe_atual):
+    if not preencher_pesquisa_generica(pagina, tipo_pesquisa, valor_busca, classe_atual):
         print(f"[{rotulo_tribunal}] Não consegui refazer a pesquisa completa nem depois do reload.")
         return False
 
@@ -1617,6 +1760,7 @@ def fazer_login_eproc(sessao, tribunal):
         logou_com_certificado = tentar_login_certificado(sessao.pagina, nome)
 
     if not logou_com_certificado:
+        verificar_e_aguardar_cloudflare(sessao.pagina)
         ok, pagina_atualizada = tentar_login_usuario_senha(
             sessao.pagina,
             sessao.contexto,
@@ -1631,6 +1775,7 @@ def fazer_login_eproc(sessao, tribunal):
 
     totp_secret_bruto = os.getenv(tribunal["totp_secret_env"]) or ""
     totp_secret = totp_secret_bruto.replace(" ", "").strip().upper()
+    verificar_e_aguardar_cloudflare(sessao.pagina)
     tratar_totp_se_necessario(sessao.pagina, totp_secret, nome, timeout_segundos=60)
 
     for segundo in range(tribunal.get("segundos_espera_geral", 240)):
@@ -1696,29 +1841,31 @@ def processar_eproc_tribunal(sessao, tribunal):
     contexto = sessao.contexto
     timeout_resultados = tribunal.get("timeout_resultados", 150)
     ano_atual = str(datetime.now().year)
+    tipo_pesquisa = tribunal.get("tipo_pesquisa", "CPF/CNPJ")
 
-    for indice_cnpj, cnpj_atual in enumerate(tribunal["cnpjs"]):
+    for indice_valor, valor_busca_atual in enumerate(tribunal["valores_busca"]):
         for indice_classe, classe_atual in enumerate(tribunal["classes"]):
             print()
-            print(f"--- {nome} / CNPJ {cnpj_atual} / {classe_atual} ---")
+            print(f"--- {nome} / {tipo_pesquisa} {valor_busca_atual} / {classe_atual} ---")
+            chave_uv = f"{nome}||{tipo_pesquisa}||{valor_busca_atual}||{classe_atual}"
             # Reafirma "rodando" a cada combinação — se travar numa
             # específica, o "atualizadoEm" para de avançar mesmo com
             # o heartbeat do grupo continuando (ajuda a diferenciar
             # "tribunal travado" de "processo inteiro morto").
             status_bots.atualizar_status(nome, NOME_DO_GRUPO, "rodando")
 
-            if indice_cnpj == 0 and indice_classe == 0:
-                preencheu = preencher_pesquisa_cpf_cnpj(pagina, cnpj_atual, classe_atual)
+            if indice_valor == 0 and indice_classe == 0:
+                preencheu = preencher_pesquisa_generica(pagina, tipo_pesquisa, valor_busca_atual, classe_atual)
                 if not preencheu:
                     print(f"[{nome}] Não consegui preencher a pesquisa inicial — pulando este tribunal.")
                     diagnosticar_tela(pagina, f"{nome}_erro_preencher_pesquisa")
                     sessao.pagina = pagina
-                    return False, "Não consegui preencher a pesquisa inicial (Tipo de Pesquisa/CPF/Classe)"
+                    return False, "Não consegui preencher a pesquisa inicial (Tipo de Pesquisa/Valor/Classe)"
             else:
                 sucesso_filtro = False
-                if selecionar_tipo_pesquisa(pagina, "CPF/CNPJ"):
+                if selecionar_tipo_pesquisa(pagina, tipo_pesquisa):
                     pagina.wait_for_timeout(1000)
-                    if preencher_cpf_cnpj(pagina, cnpj_atual):
+                    if preencher_valor_busca(pagina, tipo_pesquisa, valor_busca_atual):
                         if definir_classe_unica(pagina, classe_atual):
                             sucesso_filtro = True
                         else:
@@ -1726,7 +1873,9 @@ def processar_eproc_tribunal(sessao, tribunal):
                             diagnosticar_tela(pagina, f"{nome}_erro_trocar_classe")
 
                 if not sucesso_filtro:
-                    sucesso_filtro = recarregar_e_refazer_pesquisa(pagina, cnpj_atual, classe_atual, nome)
+                    sucesso_filtro = recarregar_e_refazer_pesquisa(
+                        pagina, tipo_pesquisa, valor_busca_atual, classe_atual, nome
+                    )
 
                 if not sucesso_filtro:
                     continue
@@ -1740,6 +1889,7 @@ def processar_eproc_tribunal(sessao, tribunal):
                 except Exception:
                     pass
                 pagina.wait_for_timeout(2000)
+                verificar_e_aguardar_cloudflare(pagina)
 
                 if pagina_parece_ser_processo(pagina):
                     print(f"[{nome}] Consulta redirecionou direto para um processo (resultado único).")
@@ -1748,13 +1898,13 @@ def processar_eproc_tribunal(sessao, tribunal):
                     processos_encontrados = garantir_resultados_ano_atual(pagina, timeout_geral=timeout_resultados)
 
             if ja_e_processo:
-                numero_processo, e_ano_atual = checar_ano_do_processo(pagina, f"{nome}_{cnpj_atual}_{classe_atual}")
+                numero_processo, e_ano_atual = checar_ano_do_processo(pagina, f"{nome}_{valor_busca_atual}_{classe_atual}")
                 if not e_ano_atual:
                     print(f"[{nome}] Processo redirecionado não é do ano atual — pulando por segurança.")
                     pagina = fechar_processo_e_voltar(pagina, pagina)
                     sessao.pagina = pagina
                     continue
-                if processo_existe_no_firebase(numero_processo):
+                if processo_existe_no_firebase(numero_processo, chave_uv):
                     pagina = fechar_processo_e_voltar(pagina, pagina)
                     sessao.pagina = pagina
                     continue
@@ -1769,7 +1919,7 @@ def processar_eproc_tribunal(sessao, tribunal):
                 if not numero_processo or ano_atual not in numero_processo:
                     print(f"[{nome}] Não confirmei que o primeiro processo é de {ano_atual} — pulando por segurança.")
                     continue
-                if processo_existe_no_firebase(numero_processo):
+                if processo_existe_no_firebase(numero_processo, chave_uv):
                     continue
                 processo_pagina = abrir_primeiro_processo(pagina, contexto, processos_override=processos_encontrados)
                 if processo_pagina is None:
@@ -1803,7 +1953,7 @@ def processar_eproc_tribunal(sessao, tribunal):
             if not dados.get("numero"):
                 print(f"[{nome}] ERRO: não identifiquei o número do processo — não será salvo.")
             else:
-                salvar_processo_no_firebase(dados, nome)
+                salvar_processo_no_firebase(dados, nome, chave_uv)
 
             pagina = fechar_processo_e_voltar(pagina, processo_pagina)
             sessao.pagina = pagina
