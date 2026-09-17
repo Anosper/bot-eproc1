@@ -1370,13 +1370,22 @@ def extrair_partes_exequente_executado(pagina):
     )
     documento_reu = pegar_texto_por_ids(["#spnCpfParteReu0", "[id^='spnCpfParteReu']"])
 
-    if autor or reu:
-        return autor, documento_autor, reu, documento_reu
+    if not (autor or reu):
+        texto_exequente = obter_texto_coluna_parte(pagina, "EXEQUENTE", "EXECUTADO")
+        texto_executado = obter_texto_coluna_parte(pagina, "EXECUTADO", "EXEQUENTE")
+        autor, documento_autor = extrair_nome_e_documento(texto_exequente, "EXEQUENTE")
+        reu, documento_reu = extrair_nome_e_documento(texto_executado, "EXECUTADO")
 
-    texto_exequente = obter_texto_coluna_parte(pagina, "EXEQUENTE", "EXECUTADO")
-    texto_executado = obter_texto_coluna_parte(pagina, "EXECUTADO", "EXEQUENTE")
-    autor, documento_autor = extrair_nome_e_documento(texto_exequente, "EXEQUENTE")
-    reu, documento_reu = extrair_nome_e_documento(texto_executado, "EXECUTADO")
+    # No eproc, quando o processo está em segredo de justiça, o
+    # sistema geralmente NÃO escreve nada avisando isso — só deixa
+    # os campos em branco mesmo. Por isso, em vez de tentar detectar
+    # um aviso na tela, qualquer campo vazio aqui já vira esse rótulo
+    # direto (é o cenário mais comum de campo vazio nesse sistema).
+    autor = autor or "(segredo de justiça)"
+    documento_autor = documento_autor or "(segredo de justiça)"
+    reu = reu or "(segredo de justiça)"
+    documento_reu = documento_reu or "(segredo de justiça)"
+
     return autor, documento_autor, reu, documento_reu
 
 
@@ -1928,6 +1937,8 @@ def processar_eproc_tribunal(sessao, tribunal):
             autor, documento_autor, reu, documento_reu = extrair_partes_exequente_executado(processo_pagina)
             expandir_informacoes_adicionais(processo_pagina)
             valor_causa = extrair_valor_causa(processo_pagina)
+            if not valor_causa:
+                valor_causa = "(segredo de justiça)"
 
             valor_causa_num = valor_causa_para_float(valor_causa)
             if valor_causa_num is not None and valor_causa_num < VALOR_MINIMO_CAUSA:
