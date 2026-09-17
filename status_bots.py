@@ -41,7 +41,7 @@ COLECAO_STATUS = "bots_status"
 FUSO_BRASILIA = timezone(timedelta(hours=-3))
 
 HORA_INICIO = 8
-HORA_FIM = 17
+HORA_FIM = 18
 
 
 def horario_permitido():
