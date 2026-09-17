@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       ignorar_horario:
-        description: 'Rodar mesmo fora da janela 8h-17h (só para testes manuais)'
+        description: 'Rodar mesmo fora da janela 8h-18h (só para testes manuais)'
         type: boolean
         default: false
 
